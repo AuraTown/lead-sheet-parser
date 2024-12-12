@@ -2,10 +2,9 @@
 
 class IRealProParser {
   constructor() {
-    this.songData = null;
+    this.SONG_SEPARATOR = '==';
   }
 
-  // Main parsing function that handles both URLs and file content
   parse(input) {
     // Remove URL encoding if present
     const decodedInput = decodeURIComponent(input);
@@ -20,138 +19,149 @@ class IRealProParser {
   }
 
   parseURL(url) {
-    // Remove the protocol
     const content = url.replace('irealb://', '');
     
-    // Split the content by = and get components
-    const [title, composer, style, key, ...rest] = content.split('=');
+    // Check if it's a playlist (multiple songs)
+    if (content.includes(this.SONG_SEPARATOR + this.SONG_SEPARATOR)) {
+      return this.parsePlaylist(content);
+    }
     
-    // The last part contains the chord progression and additional metadata
+    return this.parseSong(content);
+  }
+
+  parsePlaylist(content) {
+    // Split content into individual songs
+    const songs = content.split(this.SONG_SEPARATOR + this.SONG_SEPARATOR)
+      .filter(song => song.trim().length > 0);
+
+    return {
+      type: 'playlist',
+      songs: songs.map(song => this.parseSong(song + this.SONG_SEPARATOR))
+    };
+  }
+
+  parseSong(content) {
+    // Split the content by = and get components
+    const parts = content.split('=');
+    
+    // Basic song info is always in the same positions
+    const [title, composer, unused, style, key, ...rest] = parts;
+    
+    // The last parts contain progression and additional metadata
     const progression = rest.join('=');
     
-    return this.parseProgression(title, composer, style, key, progression);
-  }
+    // Parse the chord progression into measures
+    const measures = this.parseProgression(progression);
 
-  parseFileContent(content) {
-    // Similar to URL parsing but handles file-specific format
-    // This would need to be adjusted based on actual file format
-    const [title, composer, style, key, progression] = content.split('=');
-    return this.parseProgression(title, composer, style, key, progression);
-  }
-
-  parseProgression(title, composer, style, key, progression) {
-    // Initialize the song structure
-    this.songData = {
-      title,
-      composer,
-      style,
-      key,
+    return {
+      type: 'song',
+      title: this.cleanText(title),
+      composer: this.cleanText(composer),
+      style: this.cleanText(style),
+      key: this.cleanKey(key),
       timeSignature: this.getTimeSignature(style),
-      sections: [],
-      tempo: 0,
-      repeats: 0
+      measures,
+      tempo: this.extractTempo(rest),
+      repeats: this.extractRepeats(rest)
     };
+  }
 
-    // Split the progression into sections
-    const sections = this.splitIntoSections(progression);
-    
-    // Parse each section
-    sections.forEach((section, index) => {
-      const sectionName = String.fromCharCode(65 + index); // A, B, C, etc.
-      const bars = this.parseBars(section);
-      
-      this.songData.sections.push({
-        name: sectionName,
-        bars
-      });
-    });
+  cleanText(text) {
+    return text.replace(/\+/g, ' ')
+      .replace(/%20/g, ' ')
+      .replace(/%23/g, '#')
+      .replace(/%2D/g, '-')
+      .trim();
+  }
 
-    return this.songData;
+  cleanKey(key) {
+    return key.replace(/\^/g, 'maj')
+      .replace(/h/g, 'm7b5')
+      .replace(/o/g, 'dim');
+  }
+
+  parseProgression(progression) {
+    // Remove iReal markup
+    const cleaned = progression.replace(/\{.*?\}/g, '')  // Remove comments/annotations
+      .replace(/\[.*?\]/g, '')  // Remove section markers
+      .replace(/[lnpsx]/g, '')  // Remove special characters
+      .replace(/Y/g, '')        // Remove placeholder
+      .replace(/XyQ/g, '');     // Remove end markers
+
+    // Split into measures
+    const measures = cleaned.split('|')
+      .filter(measure => measure.trim().length > 0)
+      .map(measure => this.parseMeasure(measure));
+
+    return measures;
+  }
+
+  parseMeasure(measure) {
+    const chords = [];
+    let currentChord = '';
+    let duration = 1;  // Default duration (whole measure)
+
+    // Parse each character
+    for (let char of measure) {
+      if (this.isChordChar(char)) {
+        if (currentChord) {
+          chords.push({ chord: currentChord, duration });
+          currentChord = '';
+        }
+        currentChord = char;
+      } else {
+        currentChord += char;
+      }
+    }
+
+    // Add the last chord if exists
+    if (currentChord) {
+      chords.push({ chord: currentChord, duration });
+    }
+
+    return {
+      chords: chords.map(chord => ({
+        ...chord,
+        chord: this.cleanChord(chord.chord)
+      }))
+    };
+  }
+
+  isChordChar(char) {
+    return /[A-G]/.test(char);
+  }
+
+  cleanChord(chord) {
+    return chord
+      .replace(/h/g, 'm7b5')
+      .replace(/o/g, 'dim')
+      .replace(/\^/g, 'maj')
+      .trim();
   }
 
   getTimeSignature(style) {
-    // Map common styles to time signatures
     const timeSignatures = {
       'Waltz': '3/4',
+      'Jazz Waltz': '3/4',
+      'Bossa Nova': '4/4',
+      'Samba': '4/4',
       'Swing': '4/4',
       'Latin': '4/4',
-      // Add more style mappings
+      'Ballad': '4/4',
+      'Medium Swing': '4/4',
+      'Choro': '2/4'
     };
     return timeSignatures[style] || '4/4';
   }
 
-  splitIntoSections(progression) {
-    // Split the progression into sections based on delimiters
-    // This is a simplified version - would need to handle all iReal Pro section markers
-    return progression.split('|');
+  extractTempo(metadata) {
+    const tempoMatch = metadata.join('=').match(/=(\d+)=/);
+    return tempoMatch ? parseInt(tempoMatch[1]) : 0;
   }
 
-  parseBars(section) {
-    const bars = [];
-    let currentBar = { bar: bars.length + 1, chords: [] };
-    let currentBeats = 0;
-    
-    // Split the section into chord symbols
-    const chordSymbols = this.tokenizeChords(section);
-    
-    chordSymbols.forEach(chord => {
-      const chordLength = this.getChordLength(chord);
-      
-      if (currentBeats + chordLength > this.getBeatsPerBar()) {
-        // Start a new bar
-        bars.push(currentBar);
-        currentBar = { bar: bars.length + 1, chords: [] };
-        currentBeats = 0;
-      }
-      
-      currentBar.chords.push({
-        chord,
-        beats: chordLength
-      });
-      
-      currentBeats += chordLength;
-    });
-    
-    // Add the last bar if it has content
-    if (currentBar.chords.length > 0) {
-      bars.push(currentBar);
-    }
-    
-    return this.normalizeBarStructure(bars);
-  }
-
-  tokenizeChords(section) {
-    // Split section into individual chord symbols
-    // This would need sophisticated regex to handle all iReal Pro chord symbols
-    return section.match(/[A-G][^A-G]*/g) || [];
-  }
-
-  getChordLength(chord) {
-    // Determine the length of the chord based on symbols
-    // This is a simplified version - would need to handle all iReal Pro duration markers
-    if (chord.includes('h')) return 2;
-    if (chord.includes('q')) return 1;
-    return this.getBeatsPerBar();
-  }
-
-  getBeatsPerBar() {
-    // Get beats per bar based on time signature
-    const [beats] = this.songData.timeSignature.split('/').map(Number);
-    return beats;
-  }
-
-  normalizeBarStructure(bars) {
-    // Convert bars with single chord to simpler structure
-    return bars.map(bar => {
-      if (bar.chords.length === 1) {
-        return {
-          bar: bar.bar,
-          chord: bar.chords[0].chord,
-          beats: bar.chords[0].beats
-        };
-      }
-      return bar;
-    });
+  extractRepeats(metadata) {
+    const repeatMatch = metadata.join('=').match(/=(\d+)=$/);
+    return repeatMatch ? parseInt(repeatMatch[1]) : 0;
   }
 }
 
